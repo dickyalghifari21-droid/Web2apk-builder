@@ -1,0 +1,120 @@
+name: Build APK from Web2APK Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL Website (jika dari URL)'
+        required: false
+        type: string
+      app_name:
+        description: 'Nama Aplikasi'
+        required: true
+        type: string
+      package_name:
+        description: 'Package Name (com.example.app)'
+        required: true
+        type: string
+      user_id:
+        description: 'Telegram User ID'
+        required: true
+        type: string
+      zip_url:
+        description: 'URL ZIP file (jika dari Flutter)'
+        required: false
+        type: string
+      build_type:
+        description: 'Tipe Build'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    # ========== SETUP NODE.js ==========
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    # ========== INSTALL WEB2APK CLI ==========
+    - name: Install Web2APK CLI
+      run: npm install -g @web2apk/cli
+    
+    # ========== BUILD DARI URL (PWA) ==========
+    - name: Build from URL
+      if: ${{ github.event.inputs.zip_url == '' && github.event.inputs.url != '' }}
+      run: |
+        web2apk build \
+          --url "${{ github.event.inputs.url }}" \
+          --name "${{ github.event.inputs.app_name }}" \
+          --package "${{ github.event.inputs.package_name }}" \
+          --output ./output
+    
+    # ========== BUILD DARI ZIP (FLUTTER) ==========
+    - name: Download and Build from ZIP
+      if: ${{ github.event.inputs.zip_url != '' }}
+      run: |
+        # Download ZIP
+        curl -L -o project.zip "${{ github.event.inputs.zip_url }}"
+        unzip project.zip -d project
+        
+        # Setup Flutter
+        git clone https://github.com/flutter/flutter.git --depth 1 -b stable
+        export PATH="$PATH:$GITHUB_WORKSPACE/flutter/bin"
+        flutter precache
+        flutter doctor
+        
+        # Build APK
+        cd project
+        flutter clean
+        flutter pub get
+        if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
+          flutter build apk --release
+        else
+          flutter build apk --debug
+        fi
+        
+        # Copy hasil build
+        mkdir -p $GITHUB_WORKSPACE/output
+        find . -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \;
+    
+    # ========== KIRIM KE TELEGRAM ==========
+    - name: Send APK to Telegram
+      if: success()
+      run: |
+        BOT_TOKEN="${{ secrets.BOT_TOKEN }}"
+        CHAT_ID="${{ github.event.inputs.user_id }}"
+        
+        for apk in output/*.apk; do
+          if [ -f "$apk" ]; then
+            curl -F "chat_id=$CHAT_ID" \
+                 -F "document=@$apk" \
+                 -F "caption=✅ *Build Berhasil!*\n\n📦 Nama: ${{ github.event.inputs.app_name }}\n📲 Package: ${{ github.event.inputs.package_name }}\n🔧 Type: ${{ github.event.inputs.build_type }}\n⏱️ Waktu: $(date '+%Y-%m-%d %H:%M:%S')" \
+                 "https://api.telegram.org/bot$BOT_TOKEN/sendDocument"
+          fi
+        done
+    
+    # ========== KIRIM NOTIF GAGAL ==========
+    - name: Send Error Notification
+      if: failure()
+      run: |
+        curl -F "chat_id=${{ github.event.inputs.user_id }}" \
+             -F "text=❌ *Build Gagal!*\n\n📦 Nama: ${{ github.event.inputs.app_name }}\n\nSilakan cek log GitHub Actions untuk detail error." \
+             "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage"
+    
+    # ========== CLEANUP ==========
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -rf output project
