@@ -1,36 +1,20 @@
-name: Build APK from Web2APK Bot
+name: Build APK from ZIP
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: 'URL Website (jika dari URL)'
-        required: false
+      zip_url:
+        description: 'URL ZIP file Flutter'
+        required: true
         type: string
       app_name:
         description: 'Nama Aplikasi'
-        required: true
-        type: string
-      package_name:
-        description: 'Package Name (com.example.app)'
         required: true
         type: string
       user_id:
         description: 'Telegram User ID'
         required: true
         type: string
-      zip_url:
-        description: 'URL ZIP file (jika dari Flutter)'
-        required: false
-        type: string
-      build_type:
-        description: 'Tipe Build'
-        required: false
-        default: 'release'
-        type: choice
-        options:
-          - release
-          - debug
 
 jobs:
   build:
@@ -38,83 +22,63 @@ jobs:
     timeout-minutes: 30
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    # ========== SETUP NODE.js ==========
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
+    - name: Setup Java
+      uses: actions/setup-java@v4
       with:
-        node-version: '20'
+        distribution: 'temurin'
+        java-version: '17'
     
-    # ========== INSTALL WEB2APK CLI ==========
-    - name: Install Web2APK CLI
-      run: npm install -g @web2apk/cli
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.22.0'
+        channel: 'stable'
     
-    # ========== BUILD DARI URL (PWA) ==========
-    - name: Build from URL
-      if: ${{ github.event.inputs.zip_url == '' && github.event.inputs.url != '' }}
+    - name: Setup Android SDK
       run: |
-        web2apk build \
-          --url "${{ github.event.inputs.url }}" \
-          --name "${{ github.event.inputs.app_name }}" \
-          --package "${{ github.event.inputs.package_name }}" \
-          --output ./output
+        sudo apt-get update
+        sudo apt-get install -y wget unzip
+        wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+        unzip commandlinetools-linux-11076708_latest.zip -d cmdline-tools
+        mkdir -p android-sdk/cmdline-tools
+        mv cmdline-tools/cmdline-tools android-sdk/cmdline-tools/latest
+        export ANDROID_SDK_ROOT=$GITHUB_WORKSPACE/android-sdk
+        echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+        yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses
+        $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
     
-    # ========== BUILD DARI ZIP (FLUTTER) ==========
-    - name: Download and Build from ZIP
-      if: ${{ github.event.inputs.zip_url != '' }}
+    - name: Download ZIP
       run: |
-        # Download ZIP
         curl -L -o project.zip "${{ github.event.inputs.zip_url }}"
         unzip project.zip -d project
-        
-        # Setup Flutter
-        git clone https://github.com/flutter/flutter.git --depth 1 -b stable
-        export PATH="$PATH:$GITHUB_WORKSPACE/flutter/bin"
-        flutter precache
-        flutter doctor
-        
-        # Build APK
-        cd project
+        echo "Extracted files:"
+        ls -la project/
+        PROJECT_ROOT=$(find project -name "pubspec.yaml" -type f | head -1 | xargs dirname)
+        echo "PROJECT_ROOT=$PROJECT_ROOT" >> $GITHUB_ENV
+        echo "Project root: $PROJECT_ROOT"
+    
+    - name: Build APK
+      run: |
+        cd $PROJECT_ROOT
         flutter clean
         flutter pub get
-        if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
-          flutter build apk --release
-        else
-          flutter build apk --debug
-        fi
-        
-        # Copy hasil build
-        mkdir -p $GITHUB_WORKSPACE/output
-        find . -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \;
+        flutter build apk --release
     
-    # ========== KIRIM KE TELEGRAM ==========
     - name: Send APK to Telegram
       if: success()
       run: |
-        BOT_TOKEN="${{ secrets.BOT_TOKEN }}"
-        CHAT_ID="${{ github.event.inputs.user_id }}"
+        APK_PATH=$(find $PROJECT_ROOT/build/app/outputs/flutter-apk -name "*.apk" | head -1)
+        APK_NAME=$(basename "$APK_PATH")
+        APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
         
-        for apk in output/*.apk; do
-          if [ -f "$apk" ]; then
-            curl -F "chat_id=$CHAT_ID" \
-                 -F "document=@$apk" \
-                 -F "caption=✅ *Build Berhasil!*\n\n📦 Nama: ${{ github.event.inputs.app_name }}\n📲 Package: ${{ github.event.inputs.package_name }}\n🔧 Type: ${{ github.event.inputs.build_type }}\n⏱️ Waktu: $(date '+%Y-%m-%d %H:%M:%S')" \
-                 "https://api.telegram.org/bot$BOT_TOKEN/sendDocument"
-          fi
-        done
+        curl -F "chat_id=${{ github.event.inputs.user_id }}" \
+             -F "document=@$APK_PATH" \
+             -F "caption=✅ *Build Berhasil!*\n\n📦 Nama: ${{ github.event.inputs.app_name }}\n📲 APK: $APK_NAME\n📦 Ukuran: $APK_SIZE\n⏱️ Waktu: $(date '+%Y-%m-%d %H:%M:%S')" \
+             "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendDocument"
     
-    # ========== KIRIM NOTIF GAGAL ==========
     - name: Send Error Notification
       if: failure()
       run: |
         curl -F "chat_id=${{ github.event.inputs.user_id }}" \
              -F "text=❌ *Build Gagal!*\n\n📦 Nama: ${{ github.event.inputs.app_name }}\n\nSilakan cek log GitHub Actions untuk detail error." \
              "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendMessage"
-    
-    # ========== CLEANUP ==========
-    - name: Cleanup
-      if: always()
-      run: |
-        rm -rf output project
