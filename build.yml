@@ -12,6 +12,22 @@ on:
       icon_url:
         description: 'Icon Url'
         required: true
+      build_type:
+        description: 'Tipe build (release/debug)'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      analyze_only:
+        description: 'Mode analyze only'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - true
+          - false
 
 jobs:
   build:
@@ -26,7 +42,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.0'
+          flutter-version: '3.22.0'
           channel: stable
           cache: true
 
@@ -476,12 +492,24 @@ jobs:
           dart run flutter_launcher_icons -f flutter_launcher_icons.yaml
 
       - name: Build APK
+        if: github.event.inputs.analyze_only != 'true'
         run: |
           cd myapp
-          flutter build apk --release
+          if [ "${{ github.event.inputs.build_type }}" == "debug" ]; then
+            flutter build apk --debug
+          else
+            flutter build apk --release
+          fi
+
+      - name: Flutter Analyze
+        if: github.event.inputs.analyze_only == 'true'
+        run: |
+          cd myapp
+          flutter analyze
 
       - name: Upload APK
+        if: github.event.inputs.analyze_only != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: web2apk-release
-          path: myapp/build/app/outputs/flutter-apk/app-release.apk
+          name: web2apk-${{ github.event.inputs.build_type }}
+          path: myapp/build/app/outputs/flutter-apk/*.apk
