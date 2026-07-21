@@ -9,6 +9,9 @@ on:
       tag:
         description: 'Job ID / tag unik untuk build ini'
         required: true
+      chat_id:
+        description: 'Chat ID user untuk kirim notifikasi'
+        required: true
       build_type:
         description: 'Tipe build (release/debug)'
         required: false
@@ -103,10 +106,8 @@ jobs:
           if [ -f myapp/build_log.txt ]; then
             if grep -q "FAILURE\|Error\|error\|Exception\|Failed" myapp/build_log.txt; then
               echo "status=failed" >> $GITHUB_OUTPUT
-              # Ambil error lines
               grep -E "Error:|Exception:|FAILURE:|Failed:" myapp/build_log.txt | head -n 20 > error_lines.txt
               tail -n 50 myapp/build_log.txt > error_summary.txt
-              # Cek error spesifik
               if grep -q "The current Dart SDK version" myapp/build_log.txt; then
                 echo "error_type=dart_sdk" >> $GITHUB_OUTPUT
               elif grep -q "font_awesome_flutter" myapp/build_log.txt; then
@@ -142,32 +143,33 @@ jobs:
           path: myapp/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
 
-      # 🔥 KIRIM FILE ERROR KE BOT
-      - name: Kirim file error ke bot
+      # 🔥 KIRIM FILE ERROR KE USER (pakai chat_id dari input)
+      - name: Kirim file error ke user
         if: steps.check_status.outputs.status == 'failed'
         run: |
-          # Ambil error message
-          ERROR_MSG=$(cat error_lines.txt 2>/dev/null | head -n 10 | tr '\n' '\n' | sed 's/"/\\"/g')
           JOB_ID="${{ github.event.inputs.tag }}"
           ERROR_TYPE="${{ steps.check_status.outputs.error_type }}"
+          CHAT_ID="${{ github.event.inputs.chat_id }}"
           
-          # Kirim file error_summary.txt ke bot
-          curl -F "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+          # Kirim file error_summary.txt ke user
+          curl -F "chat_id=$CHAT_ID" \
                -F "document=@error_summary.txt" \
-               -F "caption=❌ BUILD FAILED!%0AJob ID: $JOB_ID%0AError Type: $ERROR_TYPE%0A%0A$ERROR_MSG" \
+               -F "caption=❌ BUILD FAILED!%0A%0A📋 Job ID: $JOB_ID%0A⚠️ Error Type: $ERROR_TYPE%0A%0A📝 Cek file log di atas untuk detail error." \
                "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
                || echo "Gagal kirim file error"
 
-      - name: Kirim notifikasi sukses ke bot
+      - name: Kirim notifikasi sukses ke user
         if: steps.check_status.outputs.status == 'success'
         run: |
           JOB_ID="${{ github.event.inputs.tag }}"
+          CHAT_ID="${{ github.event.inputs.chat_id }}"
           
           curl -X POST \
             -H "Content-Type: application/json" \
             -d '{
-              "chat_id": "${{ secrets.TELEGRAM_CHAT_ID }}",
-              "text": "✅ BUILD SUCCESS!%0A%0A📋 Job ID: $JOB_ID%0A📱 APK sudah diupload di artifact GitHub"
+              "chat_id": "'$CHAT_ID'",
+              "text": "✅ BUILD SUCCESS!%0A%0A📋 Job ID: '$JOB_ID'%0A📱 APK sudah diupload di artifact GitHub%0A%0A🔗 https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "parse_mode": "Markdown"
             }' \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             || echo "Gagal kirim notifikasi"
