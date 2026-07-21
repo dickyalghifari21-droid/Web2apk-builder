@@ -1,0 +1,107 @@
+name: Build APK from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL download ZIP project (GitHub Release asset)'
+        required: true
+      tag:
+        description: 'Job ID / tag unik untuk build ini'
+        required: true
+      build_type:
+        description: 'Tipe build (release/debug)'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+      only_analyze:
+        description: 'Mode analyze only (true/false)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.0'
+          channel: stable
+          cache: true
+
+      - name: Download ZIP project
+        run: |
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.event.inputs.zip_url }}" \
+            -o project.zip
+
+          # Pastikan yang terdownload beneran ZIP, bukan halaman error/HTML
+          FTYPE=$(file --mime-type -b project.zip)
+          if [ "$FTYPE" != "application/zip" ]; then
+            echo "❌ File yang terdownload bukan ZIP (mime: $FTYPE). Cek apakah zip_url valid/masih berlaku."
+            exit 1
+          fi
+
+      - name: Extract ZIP project
+        run: |
+          mkdir -p myapp
+          unzip -q project.zip -d myapp_extracted
+
+          # Handle kasus ZIP yang isinya 1 folder pembungkus (mis. project-main/...)
+          # vs ZIP yang langsung berisi pubspec.yaml di root.
+          if [ -f "myapp_extracted/pubspec.yaml" ]; then
+            mv myapp_extracted/* myapp/
+          else
+            INNER=$(find myapp_extracted -maxdepth 1 -mindepth 1 -type d | head -n 1)
+            if [ -n "$INNER" ] && [ -f "$INNER/pubspec.yaml" ]; then
+              mv "$INNER"/* myapp/
+            else
+              echo "❌ Tidak ditemukan pubspec.yaml di dalam ZIP. Pastikan ZIP berisi project Flutter yang valid."
+              exit 1
+            fi
+          fi
+
+      - name: Flutter pub get
+        run: |
+          cd myapp
+          flutter pub get
+
+      - name: Flutter Analyze
+        if: github.event.inputs.only_analyze == 'true'
+        run: |
+          cd myapp
+          flutter analyze
+
+      - name: Build APK
+        if: github.event.inputs.only_analyze != 'true'
+        run: |
+          cd myapp
+          if [ "${{ github.event.inputs.build_type }}" == "debug" ]; then
+            flutter build apk --debug
+          else
+            flutter build apk --release
+          fi
+
+      - name: Upload APK artifact
+        if: github.event.inputs.only_analyze != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.event.inputs.tag }}
+          path: myapp/build/app/outputs/flutter-apk/*.apk
+          retention-days: 1
