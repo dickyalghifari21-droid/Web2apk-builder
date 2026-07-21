@@ -11,7 +11,8 @@ on:
         required: true
       chat_id:
         description: 'Chat ID user untuk kirim notifikasi'
-        required: true
+        required: false
+        default: '0'
       build_type:
         description: 'Tipe build (release/debug)'
         required: false
@@ -88,6 +89,7 @@ jobs:
           cd myapp
           flutter analyze 2>&1 | tee analyze_log.txt
 
+      # 🔥 STEP BUILD DENGAN CAPTURE LOG
       - name: Build APK
         if: github.event.inputs.only_analyze != 'true'
         id: build_apk
@@ -100,6 +102,7 @@ jobs:
             flutter build apk --release 2>&1 | tee build_log.txt
           fi
 
+      # 🔥 CEK STATUS BUILD
       - name: Check build status
         id: check_status
         run: |
@@ -107,7 +110,7 @@ jobs:
             if grep -q "FAILURE\|Error\|error\|Exception\|Failed" myapp/build_log.txt; then
               echo "status=failed" >> $GITHUB_OUTPUT
               grep -E "Error:|Exception:|FAILURE:|Failed:" myapp/build_log.txt | head -n 20 > error_lines.txt
-              tail -n 50 myapp/build_log.txt > error_summary.txt
+              tail -n 100 myapp/build_log.txt > error_summary.txt
               if grep -q "The current Dart SDK version" myapp/build_log.txt; then
                 echo "error_type=dart_sdk" >> $GITHUB_OUTPUT
               elif grep -q "font_awesome_flutter" myapp/build_log.txt; then
@@ -124,7 +127,8 @@ jobs:
             echo "status=unknown" >> $GITHUB_OUTPUT
           fi
 
-      - name: Upload error log (jika failed)
+      # 🔥 UPLOAD ERROR LOG (jika failed)
+      - name: Upload error log
         if: steps.check_status.outputs.status == 'failed'
         uses: actions/upload-artifact@v4
         with:
@@ -135,7 +139,8 @@ jobs:
             error_summary.txt
           retention-days: 1
 
-      - name: Upload APK artifact (jika success)
+      # 🔥 UPLOAD APK (jika success)
+      - name: Upload APK artifact
         if: steps.check_status.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
@@ -143,45 +148,35 @@ jobs:
           path: myapp/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
 
-      # 🔥 KIRIM FILE ERROR KE USER (pakai chat_id dari input)
-      - name: Kirim file error ke user
+      # 🔥 KIRIM FILE ERROR KE TELEGRAM (opsional, langsung dari workflow)
+      - name: Kirim error ke Telegram
         if: steps.check_status.outputs.status == 'failed'
         run: |
+          CHAT_ID="${{ github.event.inputs.chat_id }}"
           JOB_ID="${{ github.event.inputs.tag }}"
           ERROR_TYPE="${{ steps.check_status.outputs.error_type }}"
-          CHAT_ID="${{ github.event.inputs.chat_id }}"
           
-          # Kirim file error_summary.txt ke user
-          curl -F "chat_id=$CHAT_ID" \
-               -F "document=@error_summary.txt" \
-               -F "caption=❌ BUILD FAILED!%0A%0A📋 Job ID: $JOB_ID%0A⚠️ Error Type: $ERROR_TYPE%0A%0A📝 Cek file log di atas untuk detail error." \
-               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
-               || echo "Gagal kirim file error"
+          if [ -f error_summary.txt ]; then
+            # Kirim file error
+            curl -F "chat_id=$CHAT_ID" \
+                 -F "document=@error_summary.txt" \
+                 -F "caption=❌ BUILD FAILED!%0A%0A📋 Job ID: $JOB_ID%0A⚠️ Error Type: $ERROR_TYPE%0A%0A📝 Cek file log untuk detail." \
+                 "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+                 || echo "Gagal kirim file error"
+          fi
 
-      - name: Kirim notifikasi sukses ke user
+      - name: Kirim notifikasi sukses ke Telegram
         if: steps.check_status.outputs.status == 'success'
         run: |
-          JOB_ID="${{ github.event.inputs.tag }}"
           CHAT_ID="${{ github.event.inputs.chat_id }}"
+          JOB_ID="${{ github.event.inputs.tag }}"
           
           curl -X POST \
             -H "Content-Type: application/json" \
             -d '{
               "chat_id": "'$CHAT_ID'",
-              "text": "✅ BUILD SUCCESS!%0A%0A📋 Job ID: '$JOB_ID'%0A📱 APK sudah diupload di artifact GitHub%0A%0A🔗 https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-              "parse_mode": "Markdown"
+              "text": "✅ BUILD SUCCESS!%0A%0A📋 Job ID: '$JOB_ID'%0A📱 APK berhasil dibuat!%0A%0A📥 Ambil APK dengan perintah /getapk '$JOB_ID'",
+              "parse_mode": "HTML"
             }' \
             "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             || echo "Gagal kirim notifikasi"
-
-      - name: Print error summary (untuk log GitHub)
-        if: steps.check_status.outputs.status == 'failed'
-        run: |
-          echo "==================== BUILD FAILED ===================="
-          echo "Job ID: ${{ github.event.inputs.tag }}"
-          echo "Error Type: ${{ steps.check_status.outputs.error_type }}"
-          echo ""
-          echo "Error lines:"
-          cat error_lines.txt || echo "No error lines captured"
-          echo ""
-          echo "======================================================"
