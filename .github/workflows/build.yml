@@ -9,10 +9,6 @@ on:
       tag:
         description: 'Job ID / tag unik untuk build ini'
         required: true
-      chat_id:
-        description: 'Chat ID user untuk kirim notifikasi'
-        required: false
-        default: '0'
       build_type:
         description: 'Tipe build (release/debug)'
         required: false
@@ -29,6 +25,10 @@ on:
         options:
           - 'true'
           - 'false'
+      chat_id:
+        description: 'Telegram chat_id (opsional, dikirim otomatis oleh bot)'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -43,140 +43,118 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.29.0'
+          flutter-version: '3.22.0'
           channel: stable
           cache: true
 
       - name: Download ZIP project
         run: |
-          curl -L \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/octet-stream" \
-            "${{ github.event.inputs.zip_url }}" \
-            -o project.zip
+          set +e
+          {
+            curl -L \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              "${{ github.event.inputs.zip_url }}" \
+              -o project.zip
+          } 2>&1 | tee download.log
+          exit ${PIPESTATUS[0]}
 
+      - name: Validate downloaded ZIP
+        run: |
           FTYPE=$(file --mime-type -b project.zip)
           if [ "$FTYPE" != "application/zip" ]; then
-            echo "❌ File yang terdownload bukan ZIP (mime: $FTYPE)"
+            echo "❌ File yang terdownload bukan ZIP (mime: $FTYPE). Cek apakah zip_url valid/masih berlaku." | tee -a download.log
             exit 1
           fi
 
       - name: Extract ZIP project
         run: |
-          mkdir -p myapp
-          unzip -q project.zip -d myapp_extracted
+          set +e
+          {
+            mkdir -p myapp
+            unzip -q project.zip -d myapp_extracted
 
-          if [ -f "myapp_extracted/pubspec.yaml" ]; then
-            mv myapp_extracted/* myapp/
-          else
-            INNER=$(find myapp_extracted -maxdepth 1 -mindepth 1 -type d | head -n 1)
-            if [ -n "$INNER" ] && [ -f "$INNER/pubspec.yaml" ]; then
-              mv "$INNER"/* myapp/
+            if [ -f "myapp_extracted/pubspec.yaml" ]; then
+              mv myapp_extracted/* myapp/
             else
-              echo "❌ Tidak ditemukan pubspec.yaml di dalam ZIP"
-              exit 1
+              INNER=$(find myapp_extracted -maxdepth 1 -mindepth 1 -type d | head -n 1)
+              if [ -n "$INNER" ] && [ -f "$INNER/pubspec.yaml" ]; then
+                mv "$INNER"/* myapp/
+              else
+                echo "❌ Tidak ditemukan pubspec.yaml di dalam ZIP. Pastikan ZIP berisi project Flutter yang valid (bukan project Node.js/lainnya)."
+                exit 1
+              fi
             fi
-          fi
+          } 2>&1 | tee extract.log
+          exit ${PIPESTATUS[0]}
 
       - name: Flutter pub get
+        working-directory: myapp
         run: |
-          cd myapp
-          flutter pub get
+          set +e
+          flutter pub get 2>&1 | tee ../pubget.log
+          exit ${PIPESTATUS[0]}
 
       - name: Flutter Analyze
         if: github.event.inputs.only_analyze == 'true'
+        working-directory: myapp
         run: |
-          cd myapp
-          flutter analyze 2>&1 | tee analyze_log.txt
+          set +e
+          flutter analyze 2>&1 | tee ../analyze.log
+          exit ${PIPESTATUS[0]}
 
-      # 🔥 STEP BUILD DENGAN CAPTURE LOG
       - name: Build APK
         if: github.event.inputs.only_analyze != 'true'
-        id: build_apk
-        continue-on-error: true
+        working-directory: myapp
         run: |
-          cd myapp
+          set +e
           if [ "${{ github.event.inputs.build_type }}" == "debug" ]; then
-            flutter build apk --debug 2>&1 | tee build_log.txt
+            flutter build apk --debug 2>&1 | tee ../build.log
           else
-            flutter build apk --release 2>&1 | tee build_log.txt
+            flutter build apk --release 2>&1 | tee ../build.log
           fi
+          exit ${PIPESTATUS[0]}
 
-      # 🔥 CEK STATUS BUILD
-      - name: Check build status
-        id: check_status
-        run: |
-          if [ -f myapp/build_log.txt ]; then
-            if grep -q "FAILURE\|Error\|error\|Exception\|Failed" myapp/build_log.txt; then
-              echo "status=failed" >> $GITHUB_OUTPUT
-              grep -E "Error:|Exception:|FAILURE:|Failed:" myapp/build_log.txt | head -n 20 > error_lines.txt
-              tail -n 100 myapp/build_log.txt > error_summary.txt
-              if grep -q "The current Dart SDK version" myapp/build_log.txt; then
-                echo "error_type=dart_sdk" >> $GITHUB_OUTPUT
-              elif grep -q "font_awesome_flutter" myapp/build_log.txt; then
-                echo "error_type=font_awesome" >> $GITHUB_OUTPUT
-              elif grep -q "pubspec.yaml" myapp/build_log.txt; then
-                echo "error_type=pubspec" >> $GITHUB_OUTPUT
-              else
-                echo "error_type=unknown" >> $GITHUB_OUTPUT
-              fi
-            else
-              echo "status=success" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "status=unknown" >> $GITHUB_OUTPUT
-          fi
-
-      # 🔥 UPLOAD ERROR LOG (jika failed)
-      - name: Upload error log
-        if: steps.check_status.outputs.status == 'failed'
-        uses: actions/upload-artifact@v4
-        with:
-          name: error-log-${{ github.event.inputs.tag }}
-          path: |
-            myapp/build_log.txt
-            error_lines.txt
-            error_summary.txt
-          retention-days: 1
-
-      # 🔥 UPLOAD APK (jika success)
       - name: Upload APK artifact
-        if: steps.check_status.outputs.status == 'success'
+        if: success() && github.event.inputs.only_analyze != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ github.event.inputs.tag }}
           path: myapp/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
 
-      # 🔥 KIRIM FILE ERROR KE TELEGRAM (opsional, langsung dari workflow)
-      - name: Kirim error ke Telegram
-        if: steps.check_status.outputs.status == 'failed'
+      # ============================================================
+      # Kalau ADA step di atas yang gagal, kumpulkan log jadi 1 file
+      # ringkas dan upload sebagai artifact "error-log-<tag>".
+      # handleBuildFailure() di buildHandler.js SUDAH mencari artifact
+      # dengan nama mengandung "error-log" — jadi ini yang bikin
+      # laporan error di Telegram nggak lagi "unknown" / kosong.
+      # ============================================================
+      - name: Generate error summary
+        if: failure()
         run: |
-          CHAT_ID="${{ github.event.inputs.chat_id }}"
-          JOB_ID="${{ github.event.inputs.tag }}"
-          ERROR_TYPE="${{ steps.check_status.outputs.error_type }}"
-          
-          if [ -f error_summary.txt ]; then
-            # Kirim file error
-            curl -F "chat_id=$CHAT_ID" \
-                 -F "document=@error_summary.txt" \
-                 -F "caption=❌ BUILD FAILED!%0A%0A📋 Job ID: $JOB_ID%0A⚠️ Error Type: $ERROR_TYPE%0A%0A📝 Cek file log untuk detail." \
-                 "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
-                 || echo "Gagal kirim file error"
-          fi
+          mkdir -p error-artifact
+          {
+            echo "=== DOWNLOAD ZIP LOG (tail) ==="
+            tail -n 40 download.log 2>/dev/null || echo "(tidak ada log)"
+            echo ""
+            echo "=== EXTRACT ZIP LOG (tail) ==="
+            tail -n 40 extract.log 2>/dev/null || echo "(tidak ada log)"
+            echo ""
+            echo "=== FLUTTER PUB GET LOG (tail) ==="
+            tail -n 80 pubget.log 2>/dev/null || echo "(tidak ada log)"
+            echo ""
+            echo "=== FLUTTER ANALYZE LOG (tail) ==="
+            tail -n 80 analyze.log 2>/dev/null || echo "(tidak ada log)"
+            echo ""
+            echo "=== FLUTTER BUILD LOG (tail) ==="
+            tail -n 150 build.log 2>/dev/null || echo "(tidak ada log)"
+          } > error-artifact/error_summary.txt
 
-      - name: Kirim notifikasi sukses ke Telegram
-        if: steps.check_status.outputs.status == 'success'
-        run: |
-          CHAT_ID="${{ github.event.inputs.chat_id }}"
-          JOB_ID="${{ github.event.inputs.tag }}"
-          
-          curl -X POST \
-            -H "Content-Type: application/json" \
-            -d '{
-              "chat_id": "'$CHAT_ID'",
-              "text": "✅ BUILD SUCCESS!%0A%0A📋 Job ID: '$JOB_ID'%0A📱 APK berhasil dibuat!%0A%0A📥 Ambil APK dengan perintah /getapk '$JOB_ID'",
-              "parse_mode": "HTML"
-            }' \
-            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            || echo "Gagal kirim notifikasi"
+      - name: Upload error log artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-log-${{ github.event.inputs.tag }}
+          path: error-artifact/error_summary.txt
+          retention-days: 1
