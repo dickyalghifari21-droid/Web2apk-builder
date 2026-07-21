@@ -39,7 +39,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.29.0'  # <-- UBAH KE 3.29.0 (Dart 3.7.0)
+          flutter-version: '3.29.0'
           channel: stable
           cache: true
 
@@ -51,10 +51,9 @@ jobs:
             "${{ github.event.inputs.zip_url }}" \
             -o project.zip
 
-          # Pastikan yang terdownload beneran ZIP, bukan halaman error/HTML
           FTYPE=$(file --mime-type -b project.zip)
           if [ "$FTYPE" != "application/zip" ]; then
-            echo "❌ File yang terdownload bukan ZIP (mime: $FTYPE). Cek apakah zip_url valid/masih berlaku."
+            echo "❌ File yang terdownload bukan ZIP (mime: $FTYPE)"
             exit 1
           fi
 
@@ -63,8 +62,6 @@ jobs:
           mkdir -p myapp
           unzip -q project.zip -d myapp_extracted
 
-          # Handle kasus ZIP yang isinya 1 folder pembungkus (mis. project-main/...)
-          # vs ZIP yang langsung berisi pubspec.yaml di root.
           if [ -f "myapp_extracted/pubspec.yaml" ]; then
             mv myapp_extracted/* myapp/
           else
@@ -72,7 +69,7 @@ jobs:
             if [ -n "$INNER" ] && [ -f "$INNER/pubspec.yaml" ]; then
               mv "$INNER"/* myapp/
             else
-              echo "❌ Tidak ditemukan pubspec.yaml di dalam ZIP. Pastikan ZIP berisi project Flutter yang valid."
+              echo "❌ Tidak ditemukan pubspec.yaml di dalam ZIP"
               exit 1
             fi
           fi
@@ -86,22 +83,103 @@ jobs:
         if: github.event.inputs.only_analyze == 'true'
         run: |
           cd myapp
-          flutter analyze
+          flutter analyze 2>&1 | tee analyze_log.txt
 
       - name: Build APK
         if: github.event.inputs.only_analyze != 'true'
+        id: build_apk
+        continue-on-error: true
         run: |
           cd myapp
           if [ "${{ github.event.inputs.build_type }}" == "debug" ]; then
-            flutter build apk --debug
+            flutter build apk --debug 2>&1 | tee build_log.txt
           else
-            flutter build apk --release
+            flutter build apk --release 2>&1 | tee build_log.txt
           fi
 
-      - name: Upload APK artifact
-        if: github.event.inputs.only_analyze != 'true'
+      - name: Check build status
+        id: check_status
+        run: |
+          if [ -f myapp/build_log.txt ]; then
+            if grep -q "FAILURE\|Error\|error\|Exception\|Failed" myapp/build_log.txt; then
+              echo "status=failed" >> $GITHUB_OUTPUT
+              # Ambil error lines
+              grep -E "Error:|Exception:|FAILURE:|Failed:" myapp/build_log.txt | head -n 20 > error_lines.txt
+              tail -n 50 myapp/build_log.txt > error_summary.txt
+              # Cek error spesifik
+              if grep -q "The current Dart SDK version" myapp/build_log.txt; then
+                echo "error_type=dart_sdk" >> $GITHUB_OUTPUT
+              elif grep -q "font_awesome_flutter" myapp/build_log.txt; then
+                echo "error_type=font_awesome" >> $GITHUB_OUTPUT
+              elif grep -q "pubspec.yaml" myapp/build_log.txt; then
+                echo "error_type=pubspec" >> $GITHUB_OUTPUT
+              else
+                echo "error_type=unknown" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "status=success" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "status=unknown" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload error log (jika failed)
+        if: steps.check_status.outputs.status == 'failed'
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-log-${{ github.event.inputs.tag }}
+          path: |
+            myapp/build_log.txt
+            error_lines.txt
+            error_summary.txt
+          retention-days: 1
+
+      - name: Upload APK artifact (jika success)
+        if: steps.check_status.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ github.event.inputs.tag }}
           path: myapp/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
+
+      # 🔥 KIRIM FILE ERROR KE BOT
+      - name: Kirim file error ke bot
+        if: steps.check_status.outputs.status == 'failed'
+        run: |
+          # Ambil error message
+          ERROR_MSG=$(cat error_lines.txt 2>/dev/null | head -n 10 | tr '\n' '\n' | sed 's/"/\\"/g')
+          JOB_ID="${{ github.event.inputs.tag }}"
+          ERROR_TYPE="${{ steps.check_status.outputs.error_type }}"
+          
+          # Kirim file error_summary.txt ke bot
+          curl -F "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+               -F "document=@error_summary.txt" \
+               -F "caption=❌ BUILD FAILED!%0AJob ID: $JOB_ID%0AError Type: $ERROR_TYPE%0A%0A$ERROR_MSG" \
+               "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendDocument" \
+               || echo "Gagal kirim file error"
+
+      - name: Kirim notifikasi sukses ke bot
+        if: steps.check_status.outputs.status == 'success'
+        run: |
+          JOB_ID="${{ github.event.inputs.tag }}"
+          
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -d '{
+              "chat_id": "${{ secrets.TELEGRAM_CHAT_ID }}",
+              "text": "✅ BUILD SUCCESS!%0A%0A📋 Job ID: $JOB_ID%0A📱 APK sudah diupload di artifact GitHub"
+            }' \
+            "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            || echo "Gagal kirim notifikasi"
+
+      - name: Print error summary (untuk log GitHub)
+        if: steps.check_status.outputs.status == 'failed'
+        run: |
+          echo "==================== BUILD FAILED ===================="
+          echo "Job ID: ${{ github.event.inputs.tag }}"
+          echo "Error Type: ${{ steps.check_status.outputs.error_type }}"
+          echo ""
+          echo "Error lines:"
+          cat error_lines.txt || echo "No error lines captured"
+          echo ""
+          echo "======================================================"
