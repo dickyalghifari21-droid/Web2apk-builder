@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5  # ← UPDATE ke v5
         with:
           distribution: temurin
           java-version: '17'
@@ -43,7 +43,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.4'
+          flutter-version: '3.27.0'  # ← UPDATE dari 3.41.4 ke 3.27.0 (stable)
           channel: stable
           cache: true
 
@@ -88,6 +88,27 @@ jobs:
           } 2>&1 | tee extract.log
           exit ${PIPESTATUS[0]}
 
+      - name: Fix pubspec.yaml (downgrade incompatible packages)
+        working-directory: myapp
+        run: |
+          echo "🔧 Fixing pubspec.yaml for compatibility..."
+          
+          # Backup original
+          cp pubspec.yaml pubspec.yaml.bak
+          
+          # Fix versions
+          sed -i 's/audioplayers: ^6.8.1/audioplayers: ^5.2.1/g' pubspec.yaml
+          sed -i 's/audioplayers: ^6.8.0/audioplayers: ^5.2.1/g' pubspec.yaml
+          sed -i 's/fluttertoast: ^10.0.0/fluttertoast: ^8.2.8/g' pubspec.yaml
+          sed -i 's/app_links: ^7.2.1/app_links: ^6.0.0/g' pubspec.yaml
+          sed -i 's/flutter_secure_storage: ^11.0.0/flutter_secure_storage: ^9.2.2/g' pubspec.yaml
+          sed -i 's/flutter_secure_storage: ^10.0.0/flutter_secure_storage: ^9.2.2/g' pubspec.yaml
+          sed -i 's/dartssh2: ^2.14.0/dartssh2: ^2.10.0/g' pubspec.yaml
+          sed -i 's/dartssh2: ^2.13.0/dartssh2: ^2.10.0/g' pubspec.yaml
+          sed -i 's/just_audio: ^0.10.6/just_audio: ^0.9.36/g' pubspec.yaml
+          
+          echo "✅ pubspec.yaml fixed!"
+
       - name: Flutter pub get
         working-directory: myapp
         run: |
@@ -117,19 +138,12 @@ jobs:
 
       - name: Upload APK artifact
         if: success() && github.event.inputs.only_analyze != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5  # ← UPDATE ke v5
         with:
           name: apk-${{ github.event.inputs.tag }}
           path: myapp/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
 
-      # ============================================================
-      # Kalau ADA step di atas yang gagal, kumpulkan log jadi 1 file
-      # ringkas dan upload sebagai artifact "error-log-<tag>".
-      # handleBuildFailure() di buildHandler.js SUDAH mencari artifact
-      # dengan nama mengandung "error-log" — jadi ini yang bikin
-      # laporan error di Telegram nggak lagi "unknown" / kosong.
-      # ============================================================
       - name: Generate error summary
         if: failure()
         run: |
@@ -153,7 +167,7 @@ jobs:
 
       - name: Upload error log artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5  # ← UPDATE ke v5
         with:
           name: error-log-${{ github.event.inputs.tag }}
           path: error-artifact/error_summary.txt
